@@ -1,0 +1,180 @@
+################################################################################
+# Reusable Terraform plan-and-apply workflow
+#
+# Called by every IaC repo's wrapper workflow. Handles:
+#   - OIDC login to Azure (no secrets)
+#   - terraform fmt check
+#   - terraform init with remote backend
+#   - terraform validate
+#   - tfsec security scan (informational)
+#   - terraform plan with PR comment
+#   - terraform apply on push to main (after env approval)
+#
+# Inputs are passed by the calling workflow; secrets aren't needed —
+# the federated identity handles everything.
+################################################################################
+name: Terraform plan and apply (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Path containing the Terraform root module'
+        required: true
+        type: string
+      state_key:
+        description: 'Blob key for this stack''s state file (e.g. platform.tfstate)'
+        required: true
+        type: string
+      environment:
+        description: 'GitHub Environment name (used for approval gates on apply)'
+        required: false
+        type: string
+        default: ''
+      apply:
+        description: 'Whether to apply (true) or plan-only (false)'
+        required: false
+        type: boolean
+        default: false
+      terraform_version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.9.8'
+
+# Minimum permissions: OIDC token + repo read + PR comment
+permissions:
+  id-token: write       # required for OIDC
+  contents: read        # checkout
+  pull-requests: write  # comment with plan output
+
+jobs:
+  terraform:
+    name: ${{ inputs.apply && 'Apply' || 'Plan' }} — ${{ inputs.working_directory }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false  # we want raw output for PR comments
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform fmt check
+        id: fmt
+        run: terraform fmt -check -recursive -diff
+        continue-on-error: true
+
+      - name: Terraform init
+        id: init
+        env:
+          ARM_USE_AZUREAD: "true"
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_SA }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=${{ inputs.state_key }}" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: tfsec security scan
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          soft_fail: true   # informational on Day 2; tighten later
+
+      - name: Terraform plan
+        id: plan
+        if: ${{ !inputs.apply }}
+        env:
+          ARM_USE_AZUREAD: "true"
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform plan -no-color -out=tfplan
+          terraform show -no-color tfplan > plan-output.txt
+        continue-on-error: true
+
+      - name: Comment plan on PR
+        if: ${{ !inputs.apply && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const planFile = path.join('${{ inputs.working_directory }}', 'plan-output.txt');
+            let plan = '(no plan output)';
+            try {
+              plan = fs.readFileSync(planFile, 'utf8');
+            } catch (e) {
+              plan = `(could not read plan output: ${e.message})`;
+            }
+
+            // Truncate if too long for a PR comment (max 65k chars; we use 50k to leave room for wrapping)
+            const maxLen = 50000;
+            const truncated = plan.length > maxLen;
+            const planForComment = truncated
+              ? plan.substring(0, maxLen) + '\n\n... (truncated, see action logs for full plan)'
+              : plan;
+
+            const body = `### Terraform Plan — \`${{ inputs.working_directory }}\`
+
+            **fmt:** ${{ steps.fmt.outcome }} · **init:** ${{ steps.init.outcome }} · **validate:** ${{ steps.validate.outcome }} · **plan:** ${{ steps.plan.outcome }}
+
+            <details><summary>Show plan</summary>
+
+            \`\`\`hcl
+            ${planForComment}
+            \`\`\`
+
+            </details>
+
+            *State key: \`${{ inputs.state_key }}\` · Triggered by @${{ github.actor }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail on plan errors
+        if: ${{ !inputs.apply && steps.plan.outcome == 'failure' }}
+        run: |
+          echo "::error::Terraform plan failed. See logs above."
+          exit 1
+
+      - name: Terraform apply
+        if: ${{ inputs.apply }}
+        env:
+          ARM_USE_AZUREAD: "true"
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: terraform apply -auto-approve -no-color
