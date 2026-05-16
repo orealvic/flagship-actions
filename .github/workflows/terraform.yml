@@ -1,4 +1,4 @@
-################################################################################
+﻿################################################################################
 # Reusable Terraform plan-and-apply workflow
 #
 # Called by every IaC repo's wrapper workflow. Handles:
@@ -10,7 +10,7 @@
 #   - terraform plan with PR comment
 #   - terraform apply on push to main (after env approval)
 #
-# Inputs are passed by the calling workflow; secrets aren't needed —
+# Inputs are passed by the calling workflow; secrets aren't needed â€”
 # the federated identity handles everything.
 ################################################################################
 name: Terraform plan and apply (reusable)
@@ -50,7 +50,7 @@ permissions:
 
 jobs:
   terraform:
-    name: ${{ inputs.apply && 'Apply' || 'Plan' }} — ${{ inputs.working_directory }}
+    name: ${{ inputs.apply && 'Apply' || 'Plan' }} â€” ${{ inputs.working_directory }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
 
@@ -144,9 +144,9 @@ jobs:
               ? plan.substring(0, maxLen) + '\n\n... (truncated, see action logs for full plan)'
               : plan;
 
-            const body = `### Terraform Plan — \`${{ inputs.working_directory }}\`
+            const body = `### Terraform Plan â€” \`${{ inputs.working_directory }}\`
 
-            **fmt:** ${{ steps.fmt.outcome }} · **init:** ${{ steps.init.outcome }} · **validate:** ${{ steps.validate.outcome }} · **plan:** ${{ steps.plan.outcome }}
+            **fmt:** ${{ steps.fmt.outcome }} Â· **init:** ${{ steps.init.outcome }} Â· **validate:** ${{ steps.validate.outcome }} Â· **plan:** ${{ steps.plan.outcome }}
 
             <details><summary>Show plan</summary>
 
@@ -156,7 +156,7 @@ jobs:
 
             </details>
 
-            *State key: \`${{ inputs.state_key }}\` · Triggered by @${{ github.actor }}*`;
+            *State key: \`${{ inputs.state_key }}\` Â· Triggered by @${{ github.actor }}*`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -179,5 +179,5 @@ jobs:
           ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-	  TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: terraform apply -auto-approve -no-color
